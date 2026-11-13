@@ -1,0 +1,12 @@
+{
+  "name": "@private-voting/contract",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "types": "index.ts",
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "^0.16.0",
+    "@midnight-ntwrk/midnight-js-protocol": "^4.1.1"
+  }
+}

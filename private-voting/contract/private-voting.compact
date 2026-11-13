@@ -1,0 +1,125 @@
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+export enum VotingState {
+    CLOSED,
+    OPEN
+}
+
+export enum VoteChoice {
+    BAD,
+    WORSE,
+    TIE
+}
+
+export sealed ledger organizer: Bytes<32>;
+export sealed ledger candidate0: Opaque<"string">;
+export sealed ledger candidate1: Opaque<"string">;
+
+export ledger votingState: VotingState;
+export ledger registeredVoters: Set<Bytes<32>>;
+export ledger hashedVoteMap: Map<Bytes<32>, Bytes<32>>;
+export ledger revealedVoters: Set<Bytes<32>>;
+
+export ledger totalVoteCount: Uint<16>;
+export ledger candidate0VoteCount: Uint<16>;
+export ledger candidate1VoteCount: Uint<16>;
+export ledger winner: VoteChoice;
+
+witness localGetVote(): VoteChoice;
+witness localSk(): Bytes<32>;
+
+export circuit getDappPubKey(_sk: Bytes<32>): Bytes<32> {
+    return disclose(persistentHash<Vector<2, Bytes<32>>>([pad(32, "private-voting:pk:"), _sk]));
+}
+
+circuit commitWithSk(_x: Bytes<32>, _sk: Bytes<32>): Bytes<32> {
+    return disclose(persistentHash<Vector<2, Bytes<32>>>([_x, _sk]));
+}
+
+constructor(_candidate0: Opaque<"string">, _candidate1: Opaque<"string">) {
+    organizer = disclose(getDappPubKey(localSk()));
+    candidate0 = disclose(_candidate0);
+    candidate1 = disclose(_candidate1);
+    votingState = VotingState.CLOSED;
+    candidate0VoteCount = 0;
+    candidate1VoteCount = 0;
+    totalVoteCount = 0;
+    winner = VoteChoice.TIE;
+}
+
+export circuit registerToVote(): [] {
+    assert(votingState == VotingState.CLOSED, "Voting has already opened");
+    const _sk = localSk();
+    const pubKey = disclose(getDappPubKey(_sk));
+    assert(!registeredVoters.member(pubKey), "You are already registered");
+    registeredVoters.insert(pubKey);
+}
+
+export circuit openVoting(): [] {
+    const _sk = localSk();
+    const pubKey = disclose(getDappPubKey(_sk));
+    assert(organizer == pubKey, "Only the organizer can open voting");
+    assert(registeredVoters.size() > 0, "No voters registered");
+    assert(votingState == VotingState.CLOSED, "Voting is already open");
+    votingState = VotingState.OPEN;
+}
+
+export circuit commitVote(): [] {
+    assert(votingState == VotingState.OPEN, "Voting is closed");
+    const _sk = localSk();
+    const pubKey = disclose(getDappPubKey(_sk));
+    assert(registeredVoters.member(pubKey), "You are not registered");
+    assert(!hashedVoteMap.member(pubKey), "You have already voted");
+
+    const _currentVote = localGetVote();
+    assert(disclose(_currentVote == VoteChoice.BAD || _currentVote == VoteChoice.WORSE), "Invalid vote");
+
+    const hash = disclose(commitWithSk(_currentVote as Field as Bytes<32>, _sk));
+    hashedVoteMap.insert(pubKey, hash);
+    totalVoteCount = disclose((totalVoteCount + 1) as Uint<16>);
+}
+
+export circuit closeVoting(): [] {
+    const _sk = localSk();
+    const pubKey = disclose(getDappPubKey(_sk));
+    assert(organizer == pubKey, "Only the organizer can close voting");
+    assert(votingState == VotingState.OPEN, "Voting is already closed");
+    votingState = VotingState.CLOSED;
+}
+
+export circuit revealVote(): [] {
+    assert(votingState == VotingState.CLOSED, "Voting is still open");
+    const _sk = localSk();
+    const pubKey = disclose(getDappPubKey(_sk));
+    assert(hashedVoteMap.member(pubKey), "You did not vote");
+    assert(!revealedVoters.member(pubKey), "You have already revealed");
+
+    const _currentVote = disclose(localGetVote());
+    const commitHash = disclose(commitWithSk(_currentVote as Field as Bytes<32>, _sk));
+    assert(hashedVoteMap.lookup(pubKey) == commitHash, "Commitment mismatch");
+
+    revealedVoters.insert(pubKey);
+    if (_currentVote == VoteChoice.BAD) {
+        candidate0VoteCount = disclose((candidate0VoteCount + 1) as Uint<16>);
+    } else if (_currentVote == VoteChoice.WORSE) {
+        candidate1VoteCount = disclose((candidate1VoteCount + 1) as Uint<16>);
+    }
+}
+
+export circuit declareWinner(): [] {
+    const _sk = localSk();
+    const pubKey = disclose(getDappPubKey(_sk));
+    assert(organizer == pubKey, "Only the organizer can declare the winner");
+    assert(votingState == VotingState.CLOSED, "Voting is still open");
+    assert(revealedVoters.size() == totalVoteCount, "Not all voters revealed");
+
+    if (candidate0VoteCount > candidate1VoteCount) {
+        winner = VoteChoice.BAD;
+    } else if (candidate1VoteCount > candidate0VoteCount) {
+        winner = VoteChoice.WORSE;
+    } else {
+        winner = VoteChoice.TIE;
+    }
+}

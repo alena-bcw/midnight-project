@@ -1,0 +1,96 @@
+import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+import { indexerPublicDataProvider } from "@midnight-ntwrk/midnight-js-indexer-public-data-provider";
+import { FetchZkConfigProvider } from "@midnight-ntwrk/midnight-js-fetch-zk-config-provider";
+import { httpClientProofProvider } from "@midnight-ntwrk/midnight-js-http-client-proof-provider";
+import { toHex, fromHex } from "@midnight-ntwrk/midnight-js-utils";
+import { Transaction, } from "@midnight-ntwrk/ledger-v8";
+import { combineLatest, map, retry, Observable } from "rxjs";
+import { inMemoryPrivateStateProvider } from "./private-state.js";
+import { PRIVATE_STATE_ID } from "./types.js";
+export { inMemoryPrivateStateProvider } from "./private-state.js";
+export { PRIVATE_STATE_ID } from "./types.js";
+function deriveProofServerUri(substrateNodeUri) {
+    try {
+        const url = new URL(substrateNodeUri);
+        url.port = "6300";
+        url.pathname = "";
+        return url.toString().replace(/\/$/, "");
+    }
+    catch {
+        return "http://localhost:6300";
+    }
+}
+export async function createProviders(api) {
+    const config = await api.getConfiguration();
+    setNetworkId(config.networkId);
+    const publicDataProvider = indexerPublicDataProvider(config.indexerUri, config.indexerWsUri);
+    const privateStateProvider = inMemoryPrivateStateProvider();
+    const zkConfigProvider = new FetchZkConfigProvider(window.location.origin, fetch.bind(window));
+    const proofServerUri = deriveProofServerUri(config.substrateNodeUri);
+    const proofProvider = httpClientProofProvider(proofServerUri, zkConfigProvider);
+    const { shieldedCoinPublicKey, shieldedEncryptionPublicKey } = await api.getShieldedAddresses();
+    const walletProvider = {
+        getCoinPublicKey: () => shieldedCoinPublicKey,
+        getEncryptionPublicKey: () => shieldedEncryptionPublicKey,
+        balanceTx: async (tx, _ttl) => {
+            const { tx: balancedHex } = await api.balanceUnsealedTransaction(toHex(tx.serialize()), {});
+            return Transaction.deserialize("signature", "proof", "binding", fromHex(balancedHex));
+        },
+    };
+    const midnightProvider = {
+        submitTx: async (tx) => {
+            // submitTransaction takes a serialized hex string and returns void; the
+            // tx id is recovered from the transaction's own identifiers().
+            await api.submitTransaction(toHex(tx.serialize()));
+            return tx.identifiers()[0];
+        },
+    };
+    return {
+        privateStateProvider,
+        publicDataProvider,
+        zkConfigProvider,
+        proofProvider,
+        walletProvider,
+        midnightProvider,
+    };
+}
+import { deployContract, findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
+import { CompiledPrivateVotingContract } from "@private-voting/contract";
+import { createPrivateVotingPrivateState } from "@private-voting/contract/witnesses";
+export async function deploy(providers, candidate0, candidate1) {
+    const secretKey = crypto.getRandomValues(new Uint8Array(32));
+    const initialPrivateState = createPrivateVotingPrivateState(secretKey);
+    const deployed = await deployContract(providers, {
+        compiledContract: CompiledPrivateVotingContract,
+        privateStateId: PRIVATE_STATE_ID,
+        initialPrivateState,
+        args: [candidate0, candidate1],
+    });
+    return { address: deployed.address ?? deployed.contractAddress };
+}
+export async function join(providers, contractAddress) {
+    const secretKey = crypto.getRandomValues(new Uint8Array(32));
+    const initialPrivateState = createPrivateVotingPrivateState(secretKey);
+    return findDeployedContract(providers, {
+        contractAddress,
+        compiledContract: CompiledPrivateVotingContract,
+        privateStateId: PRIVATE_STATE_ID,
+        initialPrivateState,
+    });
+}
+export function createStateObservable(publicDataProvider, privateStateProvider, contractAddress, 
+// `state.data` is now a ChargedState (not a Uint8Array). Your compiled
+// contract's generated `YourContract.ledger(state.data)` accepts this value.
+parseLedger) {
+    const public$ = publicDataProvider
+        .contractStateObservable(contractAddress, { type: "latest" })
+        .pipe(map((state) => parseLedger(state.data)));
+    const private$ = new Observable((subscriber) => {
+        privateStateProvider
+            .get(PRIVATE_STATE_ID)
+            .then((s) => subscriber.next(s))
+            .catch((err) => subscriber.error(err));
+    });
+    return combineLatest([public$, private$]).pipe(map(([contractState, privateState]) => ({ contractState, privateState })), retry({ delay: 500 }));
+}
+//# sourceMappingURL=index.js.map
